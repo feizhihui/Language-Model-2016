@@ -1,0 +1,2 @@
+model_checkpoint_path: "PTB_Variables.ckpt"
+all_model_checkpoint_paths: "PTB_Variables.ckpt"
