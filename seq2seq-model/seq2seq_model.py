@@ -32,17 +32,17 @@ class Seq2SeqModel(object):
     """
 
     def __init__(self,
-                 source_vocab_size,  #英文词典长度
-                 target_vocab_size, #法语词典长度
-                 buckets, # _buckets
-                 size, # 神经元节点个数
-                 num_layers, #  rnn层数
-                 max_gradient_norm, #最大梯度值
+                 source_vocab_size,  # 英文词典长度
+                 target_vocab_size,  # 法语词典长度
+                 buckets,  # _buckets
+                 size,  # 神经元节点个数
+                 num_layers,  # rnn层数
+                 max_gradient_norm,  # 最大梯度值
                  batch_size,
                  learning_rate,
                  learning_rate_decay_factor,
                  use_lstm=False,
-                 num_samples=512, #sampled softmax损失函数的参数
+                 num_samples=512,  # sampled softmax损失函数的参数
                  forward_only=False,
                  dtype=tf.float32):
         """Create the model.
@@ -89,6 +89,7 @@ class Seq2SeqModel(object):
             b = tf.get_variable("proj_b", [self.target_vocab_size], dtype=dtype)
             output_projection = (w, b)
 
+            # 通过inputs,labels计算embedding后的sampled_softmax_loss损失
             def sampled_loss(inputs, labels):
                 labels = tf.reshape(labels, [-1, 1])
                 # We need to compute the sampled_softmax_loss using 32bit floats to
@@ -112,6 +113,8 @@ class Seq2SeqModel(object):
             cell = tf.nn.rnn_cell.MultiRNNCell([single_cell] * num_layers)
 
         # The seq2seq function: we use embedding for the input and attention.
+        # encoder_inputs[batch_size],decoder_inputs[batch_size]
+        # return: [batch_size x num_decoder_symbols],state
         def seq2seq_f(encoder_inputs, decoder_inputs, do_decode):
             return tf.nn.seq2seq.embedding_attention_seq2seq(
                 encoder_inputs,
@@ -148,6 +151,7 @@ class Seq2SeqModel(object):
                 self.target_weights, buckets, lambda x, y: seq2seq_f(x, y, True),
                 softmax_loss_function=softmax_loss_function)
             # If we use output projection, we need to project outputs for decoding.
+            # 将outputs中每个值做一次projection
             if output_projection is not None:
                 for b in xrange(len(buckets)):
                     self.outputs[b] = [
@@ -157,8 +161,7 @@ class Seq2SeqModel(object):
         else:
             self.outputs, self.losses = tf.nn.seq2seq.model_with_buckets(
                 self.encoder_inputs, self.decoder_inputs, targets,
-                self.target_weights, buckets,
-                lambda x, y: seq2seq_f(x, y, False),
+                self.target_weights, buckets, lambda x, y: seq2seq_f(x, y, False),
                 softmax_loss_function=softmax_loss_function)
 
         # Gradients and SGD update operation for training the model.
