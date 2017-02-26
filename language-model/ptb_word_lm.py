@@ -202,7 +202,7 @@ def run_epoch(session, model, data, eval_op, verbose=False):
         feed_dict[model.targets] = y
         # foreach num = num_layors
         for i, (c, h) in enumerate(model.initial_state):
-            # 可feed可不feed shape([batch_zie=20,size=200])
+            # feed shape([batch_zie=20,size=200])
             feed_dict[c] = lstm_state_value[i].c
             feed_dict[h] = lstm_state_value[i].h
         # feed_dict{x,y,c1,h1,c2,h2}

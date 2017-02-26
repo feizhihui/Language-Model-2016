@@ -5,7 +5,6 @@ from __future__ import absolute_import
 from __future__ import division
 from __future__ import print_function
 
-
 import tensorflow as tf
 
 import reader
@@ -57,8 +56,7 @@ class PTBModel(object):
         # 模型num_steps*[batch_size,hidden_size],和一个unit state [batch_size,size]
         outputs, state = tf.nn.rnn(lstm_net, inputs, initial_state=self._initial_state)
 
-        # RNN variable_scope中 每一个LSTMCELL都有一个matrix与bias变量，还有一个state(c,h)能够被feed
-        print([(v.name, tf.shape(v)) for v in tf.trainable_variables()])
+        # RNN variable_scope中 每一个LSTMCELL都有一个matrix与bias变量,还有一个state(c,h)
 
         # =====================================
         # outputs = []
@@ -166,14 +164,14 @@ def predict(session, model, vocab, id_to_word, lstm_state_value):
     word = raw_input('Please input one word:')
     if word not in vocab:
         print('Non-existent!')
-        return True
+        return
     print('id:', vocab[word])
 
     feed_dict = {}
     feed_dict[model.input_data] = [[vocab[word]]]
 
     for i, (c, h) in enumerate(model.initial_state):
-        # 可feed可不feed shape([batch_zie=20,size=200])
+        # placehold_with_default shape([batch_zie=20,size=200])
         feed_dict[c] = lstm_state_value[i].c
         feed_dict[h] = lstm_state_value[i].h
 
@@ -181,12 +179,12 @@ def predict(session, model, vocab, id_to_word, lstm_state_value):
                                                feed_dict)
     print(id_to_word[pred_value[0]])
 
-    return True
+    return lstm_state_value
 
 
 def main():
     # 获得 训练集,验证集,测试集
-    raw_data = reader.ptb_raw_data('/dataset/PTB/')
+    raw_data = reader.ptb_raw_data('/home/feizhihui/MyData/dataset/PTB')
     train_data, valid_data, test_data, vocab = raw_data
     # 根据模型规模config{small,medium,large,or test}
     # 获得2套模型参数,参数封装在config类的属性当中
@@ -201,8 +199,8 @@ def main():
         print(vocab)
         rvocab = dict(zip(vocab.values(), vocab.keys()))
         lstm_state_value = session.run(m.initial_state)
-        while (predict(session, m, vocab, rvocab, lstm_state_value)):
-            pass
+        while True:
+            lstm_state_value = predict(session, m, vocab, rvocab, lstm_state_value)
 
 
 if __name__ == "__main__":
