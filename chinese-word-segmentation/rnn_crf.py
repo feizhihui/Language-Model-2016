@@ -14,50 +14,39 @@
    batch_size = 20     # 和num_steps共同作用，要把原始训练数据划分为batch_size组，每组划分为n个长度为num_steps的句子。
    vocab_size = 10000  # 单词数量(这份训练数据中单词刚好10000种)
 
-The data required for this example is in the data/ dir of the
-PTB dataset from Tomas Mikolov's webpage:
-
-$ wget http://www.fit.vutbr.cz/~imikolov/rnnlm/simple-examples.tgz
-$ tar xvf simple-examples.tgz
-
-To run:
-
-$ python ptb_word_lm.py --data_path=simple-examples/data/
-
 """
-
-from __future__ import absolute_import
-from __future__ import division
-from __future__ import print_function
 
 import time
 
 import numpy as np
 import tensorflow as tf
 
-import reader
+import data_utils as reader
 
 
-class PTBModel(object):
-    """The PTB model."""
+class CTBModel(object):
+    """The CTB model."""
 
     def __init__(self, is_training, config):
         self.batch_size = batch_size = config.batch_size
         self.num_steps = num_steps = config.num_steps
+        # rnn神经元隐藏节点个数, embedding后的维度
         size = config.hidden_size
         vocab_size = config.vocab_size
 
         self._input_data = tf.placeholder(tf.int32, [batch_size, num_steps])
         self._targets = tf.placeholder(tf.int32, [batch_size, num_steps])
+        # sequence_lengths = tf.constant(np.ones(batch_size) * num_steps)
+        self._sequence_lengths = tf.placeholder(tf.int32, shape=(batch_size))
 
         # Slightly better results can be obtained with forget gate biases
         # initialized to 1 but the hyperparameters of the model would need to be
         # different than reported in the paper.
-        lstm_cell = tf.nn.rnn_cell.BasicLSTMCell(size, forget_bias=0.0, state_is_tuple=True)
+        lstm_cell = tf.contrib.rnn.BasicLSTMCell(size, forget_bias=0.0, state_is_tuple=True)
         if is_training and config.keep_prob < 1:
-            lstm_cell = tf.nn.rnn_cell.DropoutWrapper(
+            lstm_cell = tf.contrib.rnn.DropoutWrapper(
                 lstm_cell, output_keep_prob=config.keep_prob)
-        lstm_net = tf.nn.rnn_cell.MultiRNNCell([lstm_cell] * config.num_layers, state_is_tuple=True)
+        lstm_net = tf.contrib.rnn.MultiRNNCell([lstm_cell] * config.num_layers, state_is_tuple=True)
         # 定义模型最初始的state tuple(num_layers*[batch_size,size])
         self._initial_state = lstm_net.zero_state(batch_size, tf.float32)
 
@@ -71,50 +60,43 @@ class PTBModel(object):
         if is_training and config.keep_prob < 1:
             inputs = tf.nn.dropout(inputs, config.keep_prob)
 
-        # Simplified version of tensorflow.models.rnn.rnn.py's rnn().
-        # This builds an unrolled LSTM for tutorial purposes only.
-        # In general, use the rnn() or state_saving_rnn() from rnn.py.
-        #
-        # The alternative version of the code below is:
         # ============================================
         # tf.squeeze remove all size 1 dimensions or by specifying `squeeze_dims`.
         # [batch_size, num_steps, size] => num_steps*[batch_size,1,size]=>num_steps*[batch_size,size]
-        inputs = [tf.squeeze(input_, [1])
-                  for input_ in tf.split(1, num_steps, inputs)]
+        # inputs = [tf.squeeze(input_, [1])
+        #           for input_ in tf.split(inputs, num_steps, 1)]
         # 模型num_steps*[batch_size,hidden_size],和一个unit state [batch_size,size]
-        outputs, state = tf.nn.rnn(lstm_net, inputs, initial_state=self._initial_state)
+        outputs, state = tf.nn.dynamic_rnn(lstm_net, inputs, sequence_length=self._sequence_lengths,
+                                           initial_state=self._initial_state)
 
-        # RNN variable_scope中 每一个LSTMCELL都有一个matrix与bias变量，还有一个state(c,h) variable被feed
-        print([(v.name, tf.shape(v)) for v in tf.trainable_variables()])
-
-        # =====================================
-        # outputs = []
-        # state = self._initial_state
-        # with tf.variable_scope("RNN"):
-        #     for time_step in range(num_steps):
-        #         if time_step > 0: tf.get_variable_scope().reuse_variables()
-        #         (cell_output, state) = lstm_net(inputs[:, time_step, :], state)
-        #         outputs.append(cell_output)
-        # =====================================
         # =>[batch_size,hidden_size*num_steps]=>[batch_size*num_steps,hidden_size]
-        output = tf.reshape(tf.concat(1, outputs), [-1, size])
+        output = tf.reshape(tf.concat(outputs, 1), [-1, size])
 
         softmax_w = tf.get_variable(
-            "softmax_w", [size, vocab_size], dtype=tf.float32)
-        softmax_b = tf.get_variable("softmax_b", [vocab_size], dtype=tf.float32)
+            "softmax_w", [size, 4], dtype=tf.float32)
+        softmax_b = tf.get_variable("softmax_b", [4], dtype=tf.float32)
         # 定义rnn之后的全连接
-        # [batch_size*num_steps,hidden_size]*[size,vocab_size]=[batch_size*num_steps,vocab_size]+[vocab_size]
+        # [batch_size*num_steps,hidden_size]*[size,4]=[batch_size*num_steps,4]+[vocab_size]
         logits = tf.matmul(output, softmax_w) + softmax_b
         # 目标词语的平均负对数概率最小
-        loss = tf.nn.seq2seq.sequence_loss_by_example(
-            [logits],  # 2D Tensors List
-            [tf.reshape(self._targets, [-1])],  # 1D Tensors List
-            [tf.ones([batch_size * num_steps], dtype=tf.float32)])  # weights
 
-        correct_pred = tf.equal(tf.cast(tf.argmax(logits, 1), tf.int32), tf.reshape(self._targets, [-1]))
-        self._accuracy = tf.reduce_sum(tf.cast(correct_pred, tf.float32)) / batch_size
+        self._unary_scores = tf.reshape(logits, [-1, num_steps, 4])
 
-        self._cost = cost = tf.reduce_sum(loss) / batch_size
+        # Compute the log-likelihood of the gold sequences and keep the transition
+        # params for inference at test time.
+        #  unary_scores[batch_size,num_steps,4,4]
+        log_likelihood, transition_params = tf.contrib.crf.crf_log_likelihood(
+            self._unary_scores, self._targets, sequence_lengths=self._sequence_lengths)
+        self._transition_mat = transition_params
+        # Add a training op to tune the parameters.
+        loss = tf.reduce_mean(-log_likelihood)
+        # train_op = tf.train.GradientDescentOptimizer(learning_rate).minimize(loss)
+        # logits shape [batch_size*num_steps, 4]
+        # print(logits)
+        # print(self._targets)
+        # correct_pred = tf.equal(tf.cast(tf.argmax(logits, 1), tf.int32), tf.argmax(tf.reshape(self._targets, [-1, 4])))
+        # self._accuracy = tf.reduce_sum(tf.cast(correct_pred, tf.float32)) / (batch_size * num_steps)
+        self._cost = loss
         self._final_state = state
 
         if not is_training:
@@ -125,7 +107,7 @@ class PTBModel(object):
         tvars = tf.trainable_variables()
         # 待修剪的张量和比例 当gradients的L2模大于max_gras_norm时,则会等比例缩放
         # grads，global_norm=grads * max_grad_norm / max(global_norm，max_grad_norm)
-        grads, _ = tf.clip_by_global_norm(tf.gradients(cost, tvars),
+        grads, _ = tf.clip_by_global_norm(tf.gradients(loss, tvars),
                                           config.max_grad_norm)
         optimizer = tf.train.GradientDescentOptimizer(self._lr)
         self._train_op = optimizer.apply_gradients(zip(grads, tvars))
@@ -138,8 +120,16 @@ class PTBModel(object):
         session.run(self._lr_update, feed_dict={self._new_lr: lr_value})
 
     @property
-    def accuracy(self):
-        return self._accuracy
+    def sequence_lengths(self):
+        return self._sequence_lengths
+
+    @property
+    def transition_mat(self):
+        return self._transition_mat
+
+    @property
+    def unary_scores(self):
+        return self._unary_scores
 
     @property
     def input_data(self):
@@ -173,58 +163,79 @@ class PTBModel(object):
 class Config(object):
     """Small config."""
     init_scale = 0.1
-    learning_rate = 1.0
+    learning_rate = 0.1
     max_grad_norm = 5
     num_layers = 2
     num_steps = 20
-    hidden_size = 200
+    hidden_size = 50
     max_epoch = 4
     max_max_epoch = 13
     keep_prob = 1.0
     lr_decay = 0.5
     batch_size = 20
-    vocab_size = 10000
+    vocab_size = 6000  # 5167
 
 
-def run_epoch(session, model, data, eval_op, verbose=False):
+# crf的预测算法 tf_unary_scores(n,num_steps,4) tf_y(n,num_steps)
+def cal_accuracy(tf_unary_scores, tf_y, tf_transition, sequence_len):
+    correct_labels = 0
+    total_labels = 0
+    # 遍历每一个batch
+    for tf_unary_scores_, y_, len_ in zip(tf_unary_scores, tf_y, sequence_len):
+        tf_unary_scores_ = tf_unary_scores_[:len_]
+        y_ = y_[:len_]
+        viterbi_sequence, _ = tf.contrib.crf.viterbi_decode(
+            tf_unary_scores_, tf_transition)
+        correct_labels += np.sum(np.equal(viterbi_sequence, y_))
+        total_labels += len_
+    accuracy = 100.0 * correct_labels / float(total_labels)
+    return accuracy
+
+
+def run_epoch(session, model, tuple_data_, eval_op, verbose=False):
     """Runs the model on the given data."""
-    epoch_size = ((len(data) // model.batch_size) - 1) // model.num_steps
+    epoch_size = ((len(tuple_data_[0]) // model.batch_size) - 1) // model.num_steps
     start_time = time.time()
     costs = 0.0
-    accs = 0.0
     iters = 0
+    accuracy = 0
     # 每迭代一整遍数据集,执行op:zero_state一次
     # tuple(num_layors*[batch_size,size])
     lstm_state_value = session.run(model.initial_state)
-    for step, (x, y) in enumerate(reader.ptb_iterator(data, model.batch_size, model.num_steps)):
+    sequence_len = np.ones(shape=(model.batch_size), dtype=np.int32) * model.num_steps
+    for step, (x, y) in enumerate(reader.ctb_iterator(tuple_data_, model.batch_size, model.num_steps)):
         feed_dict = {}
         feed_dict[model.input_data] = x
         feed_dict[model.targets] = y
+        feed_dict[model.sequence_lengths] = sequence_len
         # foreach num = num_layors
         for i, (c, h) in enumerate(model.initial_state):
             # feed shape([batch_zie=20,size=200])
             feed_dict[c] = lstm_state_value[i].c
             feed_dict[h] = lstm_state_value[i].h
         # feed_dict{x,y,c1,h1,c2,h2}
-        cost, acc, lstm_state_value, _ = session.run([model.cost, model.accuracy, model.final_state, eval_op],
-                                                     feed_dict)
-        accs += acc
+        cost, lstm_state_value, _, crf_feature, crf_y, crf_transition = session.run(
+            [model.cost, model.final_state, eval_op, model.unary_scores, model.targets, model.transition_mat],
+            feed_dict)
+
+        acc = cal_accuracy(crf_feature, crf_y, crf_transition, sequence_len)
+        accuracy += acc
         costs += cost  # batch中平均每一个样本的cost
         iters += model.num_steps
-
+        # 每迭代1/10 epoch 打印一次模型损失度
         if verbose and step % (epoch_size // 10) == 10:
-            print("%.3f perplexity: %.3f speed: %.0f wps" %
+            print("%.1f perplexity: %.3f speed: %.0f wps" %
                   (step * 1.0 / epoch_size, np.exp(costs / iters),
-                   iters * model.batch_size / (time.time() - start_time)))
-            print("Accuracy:", accs / iters)
+                   iters * model.batch_size / (time.time() - start_time)), end=", ")
+            print("Accuracy:%.3f%%" % (accuracy / (step + 1)))
 
-    return np.exp(costs / iters), accs / iters
+    return np.exp(costs / iters), accuracy / (step + 1)
 
 
 def main():
     # 获得 训练集,验证集,测试集
-    raw_data = reader.ptb_raw_data('/home/feizhihui/MyData/dataset/PTB/')
-    train_data, valid_data, test_data, _ = raw_data
+    tuple_data_ = reader.read_data('F:/Datas/msr_training/msr_training.utf8.ic',
+                                   target_dict={'B': 0, 'M': 1, 'E': 2, 'S': 3})
     # 根据模型规模config{small,medium,large,or test}
     # 获得2套模型参数,参数封装在config类的属性当中
     config = Config()
@@ -239,11 +250,10 @@ def main():
         # 分别创建训练模型,验证模型,测试模型
         # reuse=None 不使用以往参数
         with tf.variable_scope("model", reuse=None, initializer=initializer):
-            m = PTBModel(is_training=True, config=config)
+            m = CTBModel(is_training=True, config=config)
         # 使用以往的参数
         with tf.variable_scope("model", reuse=True, initializer=initializer):
-            mvalid = PTBModel(is_training=False, config=config)
-            mtest = PTBModel(is_training=False, config=eval_config)
+            mtest = CTBModel(is_training=False, config=eval_config)
 
         tf.global_variables_initializer().run()
 
@@ -254,18 +264,16 @@ def main():
             m.assign_lr(session, config.learning_rate * lr_decay)
 
             print("Epoch: %d Learning rate: %.3f" % (i + 1, session.run(m.lr)))
-            train_perplexity, train_accuracy = run_epoch(session, m, train_data, m.train_op,
-                                                         verbose=True)
-            print("Epoch: %d Train Perplexity: %.3f, Train Accuracy: %.3f"
-                  % (i + 1, train_perplexity, train_accuracy))
-            valid_perplexity, valid_accuracy = run_epoch(session, mvalid, valid_data, tf.no_op(), verbose=True)
-            print("Epoch: %d Valid Perplexity: %.3f, Valid Accuracy: %.3f"
-                  % (i + 1, valid_perplexity, valid_accuracy))
+            train_perplexity, accuracy = run_epoch(session, m, tuple_data_, m.train_op,
+                                                   verbose=True)
+            print("Epoch: %d Train Perplexity: %.3f, Train Accuracy: %.3f%%"
+                  % (i + 1, train_perplexity, accuracy))
 
-        test_perplexity, test_accuracy = run_epoch(session, mtest, test_data, tf.no_op(), verbose=True)
-        print("Test Perplexity: %.3f, Test Accuracy: %.3f" % (test_perplexity, test_accuracy))
+        print("----------- Begin to Test!----------")
+        test_perplexity, accuracy = run_epoch(session, mtest, tuple_data_, tf.no_op(), verbose=True)
+        print("Test Perplexity: %.3f , Test Accuracy:%.3f%%" % (test_perplexity, accuracy))
         saver = tf.train.Saver()
-        save_path = saver.save(session, "./PTB_Model/PTB_Variables.ckpt")
+        save_path = saver.save(session, "./CTB_Model/CTB_Variables.ckpt")
         print("Save to path: ", save_path)
 
 
