@@ -1,4 +1,8 @@
 # encoding=utf-8
+"""
+Version: input one word,predict next word
+
+"""
 
 import os
 import sys
